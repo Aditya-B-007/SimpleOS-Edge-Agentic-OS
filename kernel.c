@@ -64,7 +64,7 @@ void agent_runner(void) {
         bool active = false;
 
         // Non-blocking check for messages
-        if (sys_receive_message(&msg) == 0) {
+        if (sys_receive_message(&msg) == SYS_OK) {
             switch (msg.signal_type) {
                 case SIG_SYS_FAULT:
                     if (meta->api->on_fault) {
@@ -205,7 +205,7 @@ static bool k_has_capability(Agent *agent, ObjectType type, uint32_t target_id, 
 
 //IPC: SEND MESSAGE TO ANOTHER AGENT
 int sys_send_message(uint32_t target_id, uint32_t signal, uintptr_t data) {
-    if (target_id >= MAX_AGENTS) return -1; // Invalid Target
+    if (target_id >= MAX_AGENTS) return SYS_ERR_INVALID_ID;
     Agent *target_agent = &g_agents[target_id];
     Agent *current = g_current_agent;
     Message msg;
@@ -213,7 +213,7 @@ int sys_send_message(uint32_t target_id, uint32_t signal, uintptr_t data) {
     msg.signal_type = signal;
     msg.payload = data;
     if (!enqueue_msg(target_agent, &msg)) {
-        return -2; // Mailbox Full
+        return SYS_ERR_BOX_FULL;
     }
     // If target was DORMANT or BLOCKED, make it READY
     if (target_agent->state == STATE_DORMANT || target_agent->state == STATE_BLOCKED) {
@@ -222,21 +222,21 @@ int sys_send_message(uint32_t target_id, uint32_t signal, uintptr_t data) {
     // Check for ACCESS_SEND permission
     if (current && !k_has_capability(current, OBJ_TYPE_AGENT, target_id, ACCESS_SEND)) {
         agent_log("[SEC] IPC Violation: Agent %d tried to send to %d", current->id, target_id);
-        return -2; // E_ACCESS_DENIED
+        return SYS_ERR_DENIED;
     }
-    return 0; // Success
+    return SYS_OK;
 }
 //IPC: RECEIVE MESSAGE FROM ANOTHER AGENT
 int sys_receive_message(Message* out_msg) {
-    if (g_current_agent == NULL) return -1; // No current agent
+    if (g_current_agent == NULL) return SYS_ERR_NO_AGENT;
     Agent *agent = g_current_agent;
     if (agent->mailbox_count == 0) {
-        return -2; // No messages
+        return SYS_ERR_EMPTY;
     }
     *out_msg = agent->mailbox[agent->mailbox_head];
     agent->mailbox_head = (agent->mailbox_head + 1) % MAX_MAILBOX_DEPTH;
     agent->mailbox_count--;
-    return 0; // Success
+    return SYS_OK;
 }
 //ENABLE INTERRUPTS
 void enable_interrupts(void){

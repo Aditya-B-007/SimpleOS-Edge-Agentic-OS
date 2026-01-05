@@ -126,6 +126,16 @@ typedef struct {
     SystemPermission global_perms;
     KernelObject     c_list[16]; // Fixed: Store Objects, not just Capability flags
 } CapabilitySet;
+
+typedef enum {
+    SYS_OK = 0,
+    SYS_ERR_INVALID_ID = -1,
+    SYS_ERR_BOX_FULL   = -2,
+    SYS_ERR_DENIED     = -3,
+    SYS_ERR_EMPTY      = -4,
+    SYS_ERR_NO_AGENT   = -5
+} SystemError;
+
 void kernel_init(void);
 void kernel_register_agent(const Agent* manifest);
 void kernel_scheduler(void); // The "Heartbeat"

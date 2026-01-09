@@ -1,10 +1,12 @@
 #include "kernel.h"
 #include "agent_rt.h"
-extern void arch_disable_interrupts(void);
-extern void arch_enable_interrupts(void);
-extern void arch_halt_cpu(void);
-extern void arch_context_switch(uint32_t** old_sp, uint32_t* new_sp);
-extern void arch_mpu_load_regions(Region* regions);
+#include "hal.h"
+#include "mem_manager.h"
+#include "ipc_manager.h"
+#include "scheduler.h"
+#include "irq_manager.h"
+#include "agent_factory.h"
+
 extern void arch_wait_for_interrupt(void);
 extern void arch_init_mpu(void);
 
@@ -14,7 +16,6 @@ extern const AgentManifest __stop_agents;
 
 // Architecture specific stack setup (Mock)
 extern uint32_t* arch_stack_init(void (*task_func)(void), uint32_t *stack_mem, uint32_t size);
-static uint32_t g_agent_stacks[MAX_AGENTS][1024]; // Increased pool to support Supervisor stack
 
 //GLOBAL KERNEL STATES
 static bool interrupts_enabled = false;
@@ -22,6 +23,8 @@ static Agent g_agents[MAX_AGENTS];
 static uint8_t g_agent_count = 0;
 static Agent *g_current_agent = NULL;
 static bool g_scheduler_lock = false;
+static uint32_t g_system_ticks = 0;
+Microkernel_Object Kernel;
 static void register_supervisor(void);
 static void register_netstack(void);
 static bool enqueue_msg(Agent *dest, Message *msg) {
@@ -32,7 +35,6 @@ static bool enqueue_msg(Agent *dest, Message *msg) {
     return true;
 }
 int sys_receive_message(Message* out_msg);
-volatile uint32_t g_system_ticks = 0;
 
 uint32_t agent_get_time_ms(void) {
     return g_system_ticks;
@@ -51,7 +53,7 @@ void agent_runner(void) {
     if (!g_current_agent || !g_current_agent->manifest) return;
     
     const AgentManifest *meta = (const AgentManifest *)g_current_agent->manifest;
-    uint32_t last_tick = agent_get_time_ms();
+    uint32_t last_tick = 0;
 
     // 1. Call the user's Init function
     if (meta->api->on_init) {
@@ -61,7 +63,7 @@ void agent_runner(void) {
     // 2. Enter the Event Loop
     Message msg;
     while (1) {
-        bool active = false;
+        bool active = false; 
 
         // Non-blocking check for messages
         if (sys_receive_message(&msg) == SYS_OK) {
@@ -98,176 +100,36 @@ void agent_runner(void) {
     }
 }
 
-//KERNEL INITIALIZATION
-void kernel_init(void){
-    arch_init_mpu();
-    memset(g_agents, 0, sizeof(g_agents));
-    g_agent_count = 0;
-    g_current_agent = NULL;
-    g_scheduler_lock = false;
-    interrupts_enabled = true;
-
-    // Manually register the Supervisor Agent (Bypassing linker section)
-    register_supervisor();
-    register_netstack();
-
-    // Iterate over the .agents section
-    const AgentManifest *iter = &__start_agents;
-    const AgentManifest *end = &__stop_agents;
-
-    while (iter < end) {
-        if (iter->id >= MAX_AGENTS) { iter++; continue; }
-        if (g_agents[iter->id].manifest != NULL) { iter++; continue; }
-
-        Agent *ag = &g_agents[iter->id];
-        ag->id = iter->id;
-        ag->priority = iter->priority;
-        ag->state = STATE_READY;
-        ag->manifest = iter;
-        ag->stack_ptr = arch_stack_init(agent_runner, g_agent_stacks[iter->id], iter->stack_size);
-        ag->caps = iter->caps; // Copy capabilities from ROM to RAM
-
-        g_agent_count++;
-        iter++;
-    }
-    arch_enable_interrupts();
-}
-void kernel_register_agent(const Agent* manifest){
-    if(g_agent_count >= MAX_AGENTS) return;
-    g_agents[g_agent_count] = *manifest;
-    g_agents[g_agent_count].id = g_agent_count;
-    g_agent_count++;
-}
-//KERNEL SCHEDULER - THE HEARTBEAT
-void kernel_scheduler(void) {
-    if (g_scheduler_lock) return;
-    g_scheduler_lock = true;
-    Agent *next_agent = NULL;
-    uint8_t highest_prio = 255;
-    // 1. Scan for Highest Priority READY Agent
-    // Optimization: Use a bitmap for O(1) lookup in production
-    for (int i = 0; i < MAX_AGENTS; i++) {
-        if (g_agents[i].state == STATE_READY && g_agents[i].priority < highest_prio) {
-            highest_prio = g_agents[i].priority;
-            next_agent = &g_agents[i];
-        }
-    }
-    // 2. Battery IoT Adaptation: Tickless Idle
-    // If no agent is ready, we do not spin. We sleep.
-    if (next_agent == NULL) {
-        g_current_agent = NULL; // No one owns the CPU
-        g_scheduler_lock = false;
-        // Processor enters deep sleep until Hardware Interrupt (IRQ) fires
-        arch_wait_for_interrupt(); 
-        // Upon waking, an ISR will queue a message, making an Agent READY.
-        // We then recurse or loop back to scheduler.
-        return; 
-    }
-    if (g_current_agent != NULL && 
-        g_current_agent->state == STATE_RUNNING && 
-        g_current_agent->priority <= next_agent->priority) {
-        g_scheduler_lock = false;
-        return; 
-    }
-    // 4. Context Switch
-    Agent *prev_agent = g_current_agent;
-    g_current_agent = next_agent;
-    g_current_agent->state = STATE_RUNNING;
-    // Enforce Safety: Re-program MPU for the new agent
-    arch_mpu_load_regions(g_current_agent->memory_map);
-    // Swap Stacks (Arch specific assembly)
-    if (prev_agent) {
-        arch_context_switch(&prev_agent->stack_ptr, g_current_agent->stack_ptr);
-    } else {
-        // First boot or waking from idle
-        arch_context_switch(NULL, g_current_agent->stack_ptr);
-    }
-    g_scheduler_lock = false;
-}
-
-// SECURITY: Check if agent has permission for a specific object
-static bool k_has_capability(Agent *agent, ObjectType type, uint32_t target_id, uint32_t required_perms) {
-    // 1. Check Global Permissions (Superuser/Admin)
-    if (agent->caps.global_perms & PERM_ADMIN) return true;
-
-    // 2. Check Specific Capability List (ACL)
-    for (int i = 0; i < 16; i++) {
-        KernelObject *obj = &agent->caps.c_list[i];
-        if (obj->type == OBJ_TYPE_NONE) break; // End of list
-        
-        if (obj->type == type && obj->target_id == target_id) {
-            // Check if we have the required permission bits
-            if ((obj->access_rights & required_perms) == required_perms) return true;
-        }
-    }
-    return false;
-}
-
-//IPC: SEND MESSAGE TO ANOTHER AGENT
-int sys_send_message(uint32_t target_id, uint32_t signal, uintptr_t data) {
-    if (target_id >= MAX_AGENTS) return SYS_ERR_INVALID_ID;
-    Agent *target_agent = &g_agents[target_id];
-    Agent *current = g_current_agent;
-    Message msg;
-    msg.sender_id = g_current_agent ? g_current_agent->id : 0xFFFFFFFF; // 0xFFFFFFFF for system
-    msg.signal_type = signal;
-    msg.payload = data;
-    if (!enqueue_msg(target_agent, &msg)) {
-        return SYS_ERR_BOX_FULL;
-    }
-    // If target was DORMANT or BLOCKED, make it READY
-    if (target_agent->state == STATE_DORMANT || target_agent->state == STATE_BLOCKED) {
-        target_agent->state = STATE_READY;
-    }
-    // Check for ACCESS_SEND permission
-    if (current && !k_has_capability(current, OBJ_TYPE_AGENT, target_id, ACCESS_SEND)) {
-        agent_log("[SEC] IPC Violation: Agent %d tried to send to %d", current->id, target_id);
-        return SYS_ERR_DENIED;
-    }
-    return SYS_OK;
-}
-//IPC: RECEIVE MESSAGE FROM ANOTHER AGENT
-int sys_receive_message(Message* out_msg) {
-    if (g_current_agent == NULL) return SYS_ERR_NO_AGENT;
-    Agent *agent = g_current_agent;
-    if (agent->mailbox_count == 0) {
-        return SYS_ERR_EMPTY;
-    }
-    *out_msg = agent->mailbox[agent->mailbox_head];
-    agent->mailbox_head = (agent->mailbox_head + 1) % MAX_MAILBOX_DEPTH;
-    agent->mailbox_count--;
-    return SYS_OK;
-}
 //ENABLE INTERRUPTS
 void enable_interrupts(void){
     if(!interrupts_enabled){
-        arch_enable_interrupts();
+        HAL_Impl.enable_interrupts();
         interrupts_enabled = true;
     }
 }
 //DISABLE INTERRUPTS
 void disable_interrupts(void){
     if(interrupts_enabled){
-        arch_disable_interrupts();
+        HAL_Impl.disable_interrupts();
         interrupts_enabled = false;
     }
 }
 //HALT CPU
 void halt_cpu(void){
-    arch_halt_cpu();
+    HAL_Impl.halt_cpu();
 }
 void sys_yield(void){
     if(g_current_agent != NULL){
         g_current_agent->state = STATE_READY;
     }
-    kernel_scheduler();
+    Kernel.scheduler->schedule_next();
 }
 
 void panic(const char* msg) {
-    arch_disable_interrupts();
+    HAL_Impl.disable_interrupts();
     agent_log("[KERNEL PANIC] %s", msg);
     while (1) {
-        arch_halt_cpu();
+        HAL_Impl.halt_cpu();
     }
 }
 
@@ -286,7 +148,7 @@ static void sys_agent_restart(uint32_t agent_id) {
 
 static void sys_system_reset(int mode) {
     // Stub: Halt
-    while(1) arch_halt_cpu();
+    while(1) HAL_Impl.halt_cpu();
 }
 
 typedef struct {
@@ -389,22 +251,6 @@ static const AgentManifest supervisor_manifest = {
     .caps = { .global_perms = PERM_ADMIN } // Supervisor gets full access
 };
 
-static void register_supervisor(void) {
-    uint32_t slot = supervisor_manifest.id;
-    if (slot < MAX_AGENTS) {
-        Agent *ag = &g_agents[slot];
-        ag->id = slot;
-        ag->priority = supervisor_manifest.priority;
-        ag->state = STATE_READY;
-        ag->manifest = &supervisor_manifest;
-        // Use the stack slot corresponding to the ID to avoid overlap
-        ag->stack_ptr = arch_stack_init(agent_runner, g_agent_stacks[slot], supervisor_manifest.stack_size);
-        ag->caps = supervisor_manifest.caps;
-        g_agent_count++;
-    } else {
-        panic("Critical Failure: Supervisor Agent ID exceeds MAX_AGENTS");
-    }
-}
 static void net_init(void) { agent_log("NetStack Started"); }
 static void net_msg(Message* m) { agent_log("NetStack Msg: %d", m->signal_type); }
 
@@ -427,19 +273,44 @@ static const AgentManifest net_manifest = {
     }
 };
 
-static void register_netstack(void) {
-    uint32_t slot = net_manifest.id;
-    if (slot < MAX_AGENTS) {
-        Agent *ag = &g_agents[slot];
-        ag->id = slot;
-        ag->priority = net_manifest.priority;
-        ag->state = STATE_READY;
-        ag->manifest = &net_manifest;
-        // Use the stack slot corresponding to the ID to avoid overlap
-        ag->stack_ptr = arch_stack_init(agent_runner, g_agent_stacks[slot], net_manifest.stack_size);
-        ag->caps = net_manifest.caps;
-        g_agent_count++;
-    } else {
-        panic("Critical Failure: NetStack Agent ID exceeds MAX_AGENTS");
+//KERNEL INITIALIZATION
+void kernel_init(void){
+    arch_init_mpu();
+    
+    // Initialize the Kernel Object with Singletons
+    Kernel.hal = &HAL_Impl;
+    Kernel.mm = &MemMgr_Impl;
+    Kernel.ipc = &IPC_Impl;
+    Kernel.scheduler = &Scheduler_Impl;
+    Kernel.interrupts = &IRQMgr_Impl;
+    Kernel.factory = &AgentFactory_Impl;
+
+    // Spawn Supervisor
+    AgentProfile supervisor_profile = {
+        .id = supervisor_manifest.id,
+        .priority = supervisor_manifest.priority,
+        .caps = supervisor_manifest.caps,
+        .stack_size = supervisor_manifest.stack_size,
+        .manifest = &supervisor_manifest
+    };
+    Agent* supervisor = Kernel.factory->spawn_agent(&supervisor_profile);
+    Kernel.scheduler->add_task(supervisor);
+
+    // Spawn NetStack
+    AgentProfile net_profile = {
+        .id = net_manifest.id,
+        .priority = net_manifest.priority,
+        .caps = net_manifest.caps,
+        .stack_size = net_manifest.stack_size,
+        .manifest = &net_manifest
+    };
+    Agent* netstack = Kernel.factory->spawn_agent(&net_profile);
+    Kernel.scheduler->add_task(netstack);
+
+    Kernel.hal->enable_interrupts();
+
+    // Main Loop
+    while (1) {
+        Kernel.scheduler->schedule_next();
     }
 }

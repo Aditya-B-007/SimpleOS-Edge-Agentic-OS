@@ -136,10 +136,12 @@ typedef enum {
     SYS_ERR_NO_AGENT   = -5
 } SystemError;
 
+typedef struct Microkernel_Object Microkernel_Object;
+extern Microkernel_Object Kernel;
+
 void kernel_init(void);
 void kernel_register_agent(const Agent* manifest);
 void kernel_scheduler(void); // The "Heartbeat"
-int  sys_send_message(uint32_t target_id, uint32_t signal, uintptr_t data);
 void sys_yield(void);
 void panic(const char* msg);
 #endif

@@ -41,4 +41,4 @@ uint32_t agent_get_time_ms(void);
 }
 #endif
 
-#endif
+#endif // AGENT_RT_H

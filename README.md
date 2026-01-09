@@ -6,6 +6,7 @@ industrial edge controllers, IoT devices, sensor nodes, and edge gateways.
 This OS is **not a desktop OS** and **not a Linux derivative**.
 It is built for deterministic behavior, fault isolation, long uptime,
 and safe operation in constrained, real-world environments.
+<img width="928" height="911" alt="image" src="https://github.com/user-attachments/assets/9b8529b6-2f7b-401e-82d4-3177d136c224" />
 
 ---
 

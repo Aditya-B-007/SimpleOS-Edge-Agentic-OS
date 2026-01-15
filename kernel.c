@@ -1,4 +1,5 @@
 #include "kernel.h"
+#include <stdarg.h>
 #include "agent_rt.h"
 #include "hal.h"
 #include "mem_manager.h"
@@ -40,8 +41,57 @@ uint32_t agent_get_time_ms(void) {
     return g_system_ticks;
 }
 
+// ITM Stimulus Port definitions for Cortex-M Debugging
+#define ITM_PORT0_8   (*(volatile uint8_t*)0xE0000000)
+#define ITM_PORT0_32  (*(volatile uint32_t*)0xE0000000)
+#define DEMCR         (*(volatile uint32_t*)0xE000EDFC)
+#define TRCENA        0x01000000
+
+static void early_putc(char c) {
+    if (DEMCR & TRCENA) {
+        while (ITM_PORT0_32 == 0);
+        ITM_PORT0_8 = c;
+    }
+}
+
+static void early_print_str(const char *str) {
+    while (*str) early_putc(*str++);
+}
+
+static void early_print_hex(uint32_t val) {
+    const char hex[] = "0123456789ABCDEF";
+    early_print_str("0x");
+    for (int i = 28; i >= 0; i -= 4) early_putc(hex[(val >> i) & 0xF]);
+}
+
+static void early_print_dec(uint32_t val) {
+    char buf[12];
+    int i = 0;
+    if (val == 0) { early_putc('0'); return; }
+    while (val > 0) { buf[i++] = (val % 10) + '0'; val /= 10; }
+    while (i > 0) early_putc(buf[--i]);
+}
+
 void agent_log(const char* fmt, ...) {
-    // Stub: Implement UART logging here
+    va_list args;
+    va_start(args, fmt);
+    while (*fmt) {
+        if (*fmt == '%') {
+            fmt++;
+            if (*fmt == 's') {
+                const char* s = va_arg(args, const char*);
+                early_print_str(s ? s : "(null)");
+            }
+            else if (*fmt == 'd') early_print_dec(va_arg(args, uint32_t));
+            else if (*fmt == 'x' || *fmt == 'X') early_print_hex(va_arg(args, uint32_t));
+            else { early_putc('%'); early_putc(*fmt); }
+        } else {
+            early_putc(*fmt);
+        }
+        fmt++;
+    }
+    early_putc('\n');
+    va_end(args);
 }
 
 int agent_send(uint32_t target_agent_id, uint32_t signal, void* data) {
@@ -276,6 +326,7 @@ static const AgentManifest net_manifest = {
 //KERNEL INITIALIZATION
 void kernel_init(void){
     arch_init_mpu();
+    agent_log("[KER] Kernel Initializing...");
     
     // Initialize the Kernel Object with Singletons
     Kernel.hal = &HAL_Impl;

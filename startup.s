@@ -14,9 +14,22 @@ g_pfnVectors:
 
 .section .text.reset
 .type Reset_Handler, %function
+_start:
 Reset_Handler:
     ldr r0, =_estack
     mov sp, r0
+
+    /* Initialize Kernel Stack */
+    ldr r0, =_sstack
+    ldr r1, =_estack
+    ldr r2, =0xDEADBEEF
+stack_loop:
+    cmp r0, r1
+    bge stack_done
+    str r2, [r0], #4
+    b stack_loop
+stack_done:
+
     ldr r0, =_sbss
     ldr r1, =_ebss
     mov r2, #0
@@ -34,6 +47,31 @@ bss_done:
     /* Should never return */
 hang:
     b hang
+
+/* --- HAL Architecture Implementations --- */
+
+.global arch_enable_interrupts
+.type arch_enable_interrupts, %function
+arch_enable_interrupts:
+    cpsie i
+    bx lr
+
+.global arch_disable_interrupts
+.type arch_disable_interrupts, %function
+arch_disable_interrupts:
+    cpsid i
+    bx lr
+
+.global arch_halt_cpu
+.type arch_halt_cpu, %function
+arch_halt_cpu:
+    wfi
+    bx lr
+
+.global arch_init_mpu
+.type arch_init_mpu, %function
+arch_init_mpu:
+    bx lr
 ```
 
 ### 2. Bootloader Header (`bootloader.h`)

@@ -8,7 +8,7 @@ MEMORY
 }
 
 /* Entry Point */
-ENTRY(Reset_Handler)
+ENTRY(_start)
 
 SECTIONS
 {
@@ -95,6 +95,7 @@ SECTIONS
     ._stack :
     {
         . = ALIGN(32);
+        _sstack = .;
         . = . + 0x2000;    /* 8KB Stack */
         _estack = .;       /* Top of stack used by startup.s */
     } > RAM

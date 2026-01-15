@@ -72,6 +72,14 @@ arch_halt_cpu:
 .type arch_init_mpu, %function
 arch_init_mpu:
     bx lr
+
+.global arch_context_switch
+.type arch_context_switch, %function
+arch_context_switch:
+    push {r4-r11, lr}
+    str sp, [r0]
+    mov sp, r1
+    pop {r4-r11, pc}
 ```
 
 ### 2. Bootloader Header (`bootloader.h`)
